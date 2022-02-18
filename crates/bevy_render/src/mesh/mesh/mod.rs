@@ -268,10 +268,17 @@ impl Mesh {
     /// Calculates the [`Mesh::ATTRIBUTE_NORMAL`] of a mesh.
     ///
     /// # Panics
-    /// Panics if [`Indices`] are set or [`Mesh::ATTRIBUTE_POSITION`] is not of type `float3`.
-    /// Consider calling [`Mesh::duplicate_vertices`] or export your mesh with normal attributes.
-    pub fn compute_flat_normals(&mut self) {
-        assert!(self.indices().is_none(), "`compute_flat_normals` can't work on indexed geometry. Consider calling `Mesh::duplicate_vertices`.");
+    /// Panics if [`Mesh::ATTRIBUTE_POSITION`] is not of type `float3`.
+    /// Panics if the mesh has any other topology than [`PrimitiveTopology::TriangleList`].
+    ///
+    /// FIXME: The should handle more cases since this is called as a part of gltf
+    /// mesh loading where we can't really blame users for loading meshes that might
+    /// not conform to the limitations here!
+    pub fn compute_normals(&mut self) {
+        assert!(
+            matches!(self.primitive_topology, PrimitiveTopology::TriangleList),
+            "can only compute normals for `TriangleList`s"
+        );
 
         let positions = self
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -279,13 +286,51 @@ impl Mesh {
             .as_float3()
             .expect("`Mesh::ATTRIBUTE_POSITION` vertex attributes should be of type `float3`");
 
-        let normals: Vec<_> = positions
-            .chunks_exact(3)
-            .map(|p| face_normal(p[0], p[1], p[2]))
-            .flat_map(|normal| [normal; 3])
-            .collect();
+        match self.indices() {
+            Some(indices) => {
+                let mut count: usize = 0;
+                let mut corners = [0_usize; 3];
+                let mut normals = vec![[0.0f32; 3]; positions.len()];
+                let mut adjacency_counts = vec![0_usize; positions.len()];
 
-        self.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+                for i in indices.iter() {
+                    corners[count % 3] = i;
+                    count += 1;
+                    if count % 3 == 0 {
+                        let normal = face_normal(
+                            positions[corners[0]],
+                            positions[corners[1]],
+                            positions[corners[2]],
+                        );
+                        for corner in corners {
+                            normals[corner] =
+                                (Vec3::from(normal) + Vec3::from(normals[corner])).into();
+                            adjacency_counts[corner] += 1;
+                        }
+                    }
+                }
+
+                // average (smooth) normals for shared vertices...
+                // TODO: support different methods of weighting the average
+                for i in 0..normals.len() {
+                    let count = adjacency_counts[i];
+                    if count > 0 {
+                        normals[i] = (Vec3::from(normals[i]) / (count as f32)).normalize().into();
+                    }
+                }
+
+                self.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+            }
+            None => {
+                let normals: Vec<_> = positions
+                    .chunks_exact(3)
+                    .map(|p| face_normal(p[0], p[1], p[2]))
+                    .flat_map(|normal| [normal; 3])
+                    .collect();
+
+                self.set_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+            }
+        }
     }
 
     /// Compute the Axis-Aligned Bounding Box of the mesh vertices in model space
