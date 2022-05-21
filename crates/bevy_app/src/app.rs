@@ -54,6 +54,10 @@ pub struct App {
     /// Typically, it is not configured manually, but set by one of Bevy's built-in plugins.
     /// See `bevy::winit::WinitPlugin` and [`ScheduleRunnerPlugin`](crate::schedule_runner::ScheduleRunnerPlugin).
     pub runner: Box<dyn Fn(App)>,
+    /// The [render init functions](Self::add_render_init) are responsible for completing
+    /// the initialization of plugins once the `runner` has determined that the system is
+    /// ready to support rendering.
+    pub render_inits: Vec<Box<dyn FnOnce(&mut App)>>,
     /// A container of [`Stage`]s set to be run in a linear order.
     pub schedule: Schedule,
     sub_apps: HashMap<Box<dyn AppLabel>, SubApp>,
@@ -61,6 +65,22 @@ pub struct App {
 
 /// Each `SubApp` has its own [`Schedule`] and [`World`], enabling a separation of concerns.
 struct SubApp {
+    // FIXME: remove this:
+    //
+    // The original idea behind adding this paused state was so the RenderApp sub app
+    // could be created and added while building the RenderPlugin but it would start out
+    // 'paused' so that it none of its systems would update until we were ready to finish
+    // initializing graphics state. The concern was that there are various plugins that expect
+    // to look up this sub app and modify it while building the app and so I didn't want to
+    // break that expectation.
+    //
+    // Since adding the app.add_render_init() API though, and iteratively figuring out what
+    // work needs to be deferred I realized it was pretty much all the same code I was trying
+    // to keep happy with the pause mechanism.
+    //
+    // So now if the addition of the were to simply be deferred along with the rest of the
+    // render state initialization there wouldn't be a need to have it be paused.
+    paused: bool,
     app: App,
     runner: Box<dyn Fn(&mut World, &mut App)>,
 }
@@ -99,6 +119,7 @@ impl App {
             world: Default::default(),
             schedule: Default::default(),
             runner: Box::new(run_once),
+            render_inits: vec![],
             sub_apps: HashMap::default(),
         }
     }
@@ -113,7 +134,9 @@ impl App {
         let _bevy_frame_update_span = info_span!("frame").entered();
         self.schedule.run(&mut self.world);
         for sub_app in self.sub_apps.values_mut() {
-            (sub_app.runner)(&mut self.world, &mut sub_app.app);
+            if !sub_app.paused {
+                (sub_app.runner)(&mut self.world, &mut sub_app.app);
+            }
         }
     }
 
@@ -749,6 +772,42 @@ impl App {
         self
     }
 
+    /// Adds a function that will be called when the runner wants to initialize rendering state
+    ///
+    /// A renderer init function `init_fn` is called only once by the app runner once it has
+    /// determined that the system is in a suitable state for rendering state to be initialized.
+    ///
+    /// For example on Android an runner may wait until the application has reached a 'resumed'
+    /// state with an associated SurfaceView before trying to initialize rendering state.
+    ///
+    /// `add_render_init` is typically only used by Bevy integrated plugins (e.g. `RenderPlugin`)
+    /// that need to defer initialization that depends on other render state being initialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use bevy_app::prelude::*;
+    /// #
+    /// fn my_render_init(app: &mut App) {
+    ///     let instance = find_instance();
+    ///     let device = open_device();
+    ///     let context = create_context();
+    ///     let render_app = App::empty();
+    ///     app.add_sub_app(RenderApp, render_app, move |world, render_app| {
+    ///         // prepare
+    ///         // render
+    ///     })
+    /// }
+    ///
+    /// App::new()
+    ///     .add_render_init(my_render_init);
+    /// ```
+    pub fn add_render_init(&mut self, init_fn: impl FnOnce(&mut App) + 'static) -> &mut Self {
+        let init_fn = Box::new(init_fn);
+        self.render_inits.push(init_fn);
+        self
+    }
+
     /// Adds a single [`Plugin`].
     ///
     /// One of Bevy's core principles is modularity. All Bevy engine features are implemented
@@ -868,6 +927,7 @@ impl App {
         self.sub_apps.insert(
             Box::new(label),
             SubApp {
+                paused: false,
                 app,
                 runner: Box::new(sub_app_runner),
             },
@@ -915,6 +975,45 @@ impl App {
             .get((&label) as &dyn AppLabel)
             .map(|sub_app| &sub_app.app)
             .ok_or(label)
+    }
+
+    /// Sets whether the given `SubApp` stored inside this [`App`] is paused.
+    ///
+    /// A paused `SubApp` won't receive runner updates.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `SubApp` doesn't exist.
+    pub fn sub_app_set_paused(&mut self, label: impl AppLabel, paused: bool) {
+        match self.sub_apps.get_mut((&label) as &dyn AppLabel) {
+            Some(app) => {
+                app.paused = paused;
+            },
+            None => panic!("Sub-App with label '{:?}' does not exist", label),
+        }
+    }
+
+    /// Finishes plugin setup once the `App` runner has determined system is ready for rendering
+    ///
+    /// This should be called by the `runner` function once it has determined that the system is
+    /// in a suitable state to be able to initialize render state, such as creating a GPU
+    /// context.
+    ///
+    /// For example, on Android the runner will wait until the application is first 'resumed' and
+    /// it has a valid surface view.
+    ///
+    /// This will invoke all registered [render init functions](Self::add_render_init) in the
+    /// same order that they were added.
+    ///
+    /// All registered callbacks are cleared before returning, so this can only be (meaningfully)
+    /// called once.
+    pub fn render_init(&mut self) {
+        let render_inits = std::mem::take(&mut self.render_inits);
+
+        // Initialize in the same order that render_init callbacks were registered
+        for callback in render_inits.into_iter() {
+            callback(self);
+        }
     }
 }
 

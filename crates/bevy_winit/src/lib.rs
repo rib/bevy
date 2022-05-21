@@ -44,7 +44,6 @@ impl Plugin for WinitPlugin {
             .set_runner(winit_runner)
             .add_system_to_stage(CoreStage::PostUpdate, change_window.label(ModifiesWindows));
         let event_loop = EventLoop::new();
-        handle_initial_window_events(&mut app.world, &event_loop);
         app.insert_non_send_resource(event_loop);
     }
 }
@@ -248,6 +247,8 @@ pub fn winit_runner(app: App) {
 
 /// Stores state that must persist between frames.
 struct WinitPersistentState {
+    /// Tracks whether the application has reached its first `Resumed` event
+    reached_first_resume: bool,
     /// Tracks whether or not the application is active or suspended.
     active: bool,
     /// Tracks whether or not an event has occurred this frame that would trigger an update in low
@@ -262,7 +263,14 @@ struct WinitPersistentState {
 impl Default for WinitPersistentState {
     fn default() -> Self {
         Self {
-            active: true,
+            reached_first_resume: false,
+
+            // We have to start non-active and block update()s until we get our
+            // first 'Resumed' event where we will first check for any CreateWindow requests.
+            // If we don't block updates then the Events::update system will clear the requests
+            // before they are handled!
+            active: false,
+
             low_power_event: false,
             redraw_request_sent: false,
             timeout_reached: false,
@@ -289,7 +297,34 @@ pub fn winit_runner_with(mut app: App) {
     let event_handler = move |event: Event<()>,
                               event_loop: &EventLoopWindowTarget<()>,
                               control_flow: &mut ControlFlow| {
+        //trace!("event = {event:?}");
         match event {
+            event::Event::Resumed => {
+                winit_state.active = true;
+
+                if !winit_state.reached_first_resume {
+                    // Create any primary winit window that's been requested before we initialize
+                    // render state. This ensures it's possible to create a surface for the
+                    // window that can in turn be used to find a compatible adapter.
+                    //
+                    // In particular this is required for webgl
+                    handle_create_window_events(
+                                    &mut app.world,
+                                    event_loop,
+                                    &mut create_window_event_reader,
+                    );
+                    app.render_init();
+                    winit_state.reached_first_resume = true;
+                }
+            }
+            event::Event::Suspended => {
+                trace!("Suspended");
+                winit_state.active = false;
+
+                // TODO:
+                // Somehow remove our extracted window from the renderer sub app, and let it
+                // get re-extracted so it gets a new surface created.
+            }
             event::Event::NewEvents(start) => {
                 let winit_config = app.world.resource::<WinitSettings>();
                 let windows = app.world.resource::<Windows>();
@@ -533,18 +568,17 @@ pub fn winit_runner_with(mut app: App) {
                     delta: Vec2::new(delta.0 as f32, delta.1 as f32),
                 });
             }
-            event::Event::Suspended => {
-                winit_state.active = false;
-            }
-            event::Event::Resumed => {
-                winit_state.active = true;
-            }
             event::Event::MainEventsCleared => {
-                handle_create_window_events(
-                    &mut app.world,
-                    event_loop,
-                    &mut create_window_event_reader,
-                );
+                // We only initialize render state and start creating any
+                // windows once the app has has 'resumed' for the first time.
+                if winit_state.reached_first_resume {
+                    handle_create_window_events(
+                        &mut app.world,
+                        event_loop,
+                        &mut create_window_event_reader,
+                    );
+                }
+
                 let winit_config = app.world.resource::<WinitSettings>();
                 let update = if winit_state.active {
                     let windows = app.world.resource::<Windows>();
@@ -618,25 +652,6 @@ fn handle_create_window_events(
     let create_window_events = world.resource::<Events<CreateWindow>>();
     let mut window_created_events = world.resource_mut::<Events<WindowCreated>>();
     for create_window_event in create_window_event_reader.iter(&create_window_events) {
-        let window = winit_windows.create_window(
-            event_loop,
-            create_window_event.id,
-            &create_window_event.descriptor,
-        );
-        windows.add(window);
-        window_created_events.send(WindowCreated {
-            id: create_window_event.id,
-        });
-    }
-}
-
-fn handle_initial_window_events(world: &mut World, event_loop: &EventLoop<()>) {
-    let world = world.cell();
-    let mut winit_windows = world.non_send_resource_mut::<WinitWindows>();
-    let mut windows = world.resource_mut::<Windows>();
-    let mut create_window_events = world.resource_mut::<Events<CreateWindow>>();
-    let mut window_created_events = world.resource_mut::<Events<WindowCreated>>();
-    for create_window_event in create_window_events.drain() {
         let window = winit_windows.create_window(
             event_loop,
             create_window_event.id,

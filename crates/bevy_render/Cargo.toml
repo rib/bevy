@@ -39,6 +39,7 @@ bevy_reflect = { path = "../bevy_reflect", version = "0.8.0-dev", features = ["b
 bevy_transform = { path = "../bevy_transform", version = "0.8.0-dev" }
 bevy_window = { path = "../bevy_window", version = "0.8.0-dev" }
 bevy_utils = { path = "../bevy_utils", version = "0.8.0-dev" }
+raw-window-handle = "0.4.2" # XXX: just to print raw handle for debugging
 
 # rendering
 image = { version = "0.23.12", default-features = false }

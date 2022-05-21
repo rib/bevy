@@ -123,33 +123,65 @@ impl Plugin for RenderPlugin {
             .register_type::<Color>();
 
         if let Some(backends) = options.backends {
-            let instance = wgpu::Instance::new(backends);
-            let surface = {
-                let windows = app.world.resource_mut::<bevy_window::Windows>();
-                let raw_handle = windows.get_primary().map(|window| unsafe {
-                    let handle = window.raw_window_handle().get_handle();
-                    instance.create_surface(&handle)
-                });
-                raw_handle
-            };
-            let request_adapter_options = wgpu::RequestAdapterOptions {
-                power_preference: options.power_preference,
-                compatible_surface: surface.as_ref(),
-                ..Default::default()
-            };
-            let (device, queue, adapter_info) = futures_lite::future::block_on(
-                renderer::initialize_renderer(&instance, &options, &request_adapter_options),
-            );
-            debug!("Configured wgpu adapter Limits: {:#?}", device.limits());
-            debug!("Configured wgpu adapter Features: {:#?}", device.features());
-            app.insert_resource(device.clone())
-                .insert_resource(queue.clone())
-                .insert_resource(adapter_info.clone())
+
+            // This renderer_init callback only happens once the top-level runner (e.g. bevy_winit)
+            // has determined that the system is ready for render state to be initialized
+            app.add_render_init(move |app| {
+                let instance = wgpu::Instance::new(backends);
+                /*
+                XXX: On Android VkAndroidSurfaceCreateInfoKHR, which is used by wgpu to
+                create a surface will throw a `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` if we
+                try to create multiple surfaces for a single window and Bevy is currently
+                treating this like a one-shot surface just used to find a compatible
+                adapter which later results in a second surface being created
+
+                FIXME: This look like it could be bad for other platforms too!
+
+                let surface = {
+                    let windows = app.world.resource_mut::<bevy_window::Windows>();
+                    let raw_handle = windows.get_primary().map(|window| unsafe {
+                        let handle = window.raw_window_handle().get_handle();
+                        instance.create_surface(&handle)
+                    });
+                    raw_handle
+                };
+                */
+                let surface = None;
+                let request_adapter_options = wgpu::RequestAdapterOptions {
+                    power_preference: options.power_preference,
+                    compatible_surface: surface.as_ref(),
+                    ..Default::default()
+                };
+                let (device, queue, adapter_info) = futures_lite::future::block_on(
+                    renderer::initialize_renderer(&instance, &options, &request_adapter_options),
+                );
+
+                debug!("Configured wgpu adapter Limits: {:#?}", device.limits());
+                debug!("Configured wgpu adapter Features: {:#?}", device.features());
+
+                let pipeline_cache = PipelineCache::new(device.clone());
+
+                app
+                    .insert_resource(device.clone())
+                    .insert_resource(queue.clone())
+                    .insert_resource(adapter_info.clone());
+
+                let render_app = app.get_sub_app_mut(RenderApp).unwrap();
+                render_app
+                    .insert_resource(instance)
+                    .insert_resource(device)
+                    .insert_resource(queue)
+                    .insert_resource(adapter_info)
+                    .insert_resource(pipeline_cache);
+
+                app.sub_app_set_paused(RenderApp, false);
+            });
+
+            app
                 .init_resource::<ScratchRenderWorld>()
                 .register_type::<Frustum>()
                 .register_type::<CubemapFrusta>();
 
-            let pipeline_cache = PipelineCache::new(device.clone());
             let asset_server = app.world.resource::<AssetServer>().clone();
 
             let mut render_app = App::empty();
@@ -170,11 +202,6 @@ impl Plugin for RenderPlugin {
                         .with_system(render_system.exclusive_system().at_end()),
                 )
                 .add_stage(RenderStage::Cleanup, SystemStage::parallel())
-                .insert_resource(instance)
-                .insert_resource(device)
-                .insert_resource(queue)
-                .insert_resource(adapter_info)
-                .insert_resource(pipeline_cache)
                 .insert_resource(asset_server)
                 .init_resource::<RenderGraph>();
 
@@ -282,6 +309,7 @@ impl Plugin for RenderPlugin {
                     render_app.world.clear_entities();
                 }
             });
+            app.sub_app_set_paused(RenderApp, true);
         }
 
         app.add_plugin(WindowRenderPlugin)
