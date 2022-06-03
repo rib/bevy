@@ -221,6 +221,13 @@ pub async fn initialize_renderer(
         };
     }
 
+    // XXX: HACK: WgpuSettings wasn't seeming to have the result I
+    // wanted so for now just impose strict limits to try and get
+    // _something_ rendering...
+    let features=  wgpu::Features::empty();
+    let limits = wgpu::Limits::downlevel_webgl2_defaults()
+                    .using_resolution(adapter.limits());
+
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
