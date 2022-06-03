@@ -135,14 +135,26 @@ impl Plugin for RenderPlugin {
             };
 
             let instance = wgpu::Instance::new(backends);
-            let surface = {
+
+            // FIXME: instead of creating a new surface here we should be aiming to
+            // reference the surface that's created for the primary window to avoid
+            // creating multiple render surfaces. (Or the surface created here should
+            // somehow become the surface for the primary window.)
+            //
+            // This is especially important on Android where VkAndroidSurfaceCreateInfoKHR
+            // (which is used by wgpu to reate a surface) will throw a
+            // `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` error if we try to create multiple
+            // surfaces for a single window. As a workaround for now we don't
+            // request an adapter based on a surface on Android.
+            let surface = if cfg!(not(target_os = "android")) {
                 let windows = app.world.resource_mut::<bevy_window::Windows>();
                 let raw_handle = windows.get_primary().map(|window| unsafe {
                     let handle = window.raw_window_handle().get_handle();
                     instance.create_surface(&handle)
                 });
                 raw_handle
-            };
+            } else { None };
+
             let request_adapter_options = wgpu::RequestAdapterOptions {
                 power_preference: options.power_preference,
                 compatible_surface: surface.as_ref(),
